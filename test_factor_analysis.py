@@ -40,23 +40,18 @@ def Sav2DfWithHeader(path, utf8=True):
     df = df.rename(columns=repl_col)
     return df
 
+def get_univariate_table(dfX):
+''' Equivalent to SPSS univariate table function'''
+    univariate_table = dfX.describe() #descriptive statistics
+    return univariate_table
 
-
-# load data from http://www.ats.ucla.edu/stat/spss/output/principal_components_files/M255.SAV
-df = Sav2Df('M255.SAV')
-hmap = getHeaderDict('M255.SAV')
-
-# keep columns as stipulated in original article 
-keep_cols = ['item13', 'item14', 'item15', 'item16', 'item17', 'item18', 
-             'item19', 'item20', 'item21', 'item22', 'item23', 'item24']
-
-dfX = df[keep_cols].rename(columns=hmap)#astype(float32)
-X = dfX.as_matrix()
-
-univariate_table = dfX.describe() #descriptive statistics
-
-covar_init = dfX.cov().as_matrix()
-eig_init = eig(covar_init)[0]
+def get_initial_percent_explained_variance(dfX):
+''' Normalized Eigenvalues'''
+    covar_init = dfX.cov().as_matrix()
+    eig_init = eig(covar_init)[0]
+    eig_init_perc = eig_init/sum(eig_init) *100 #Intial % Explained variance
+    eig_init_perc_df = pd.DataFrame(eig_init_perc, columns=['Initial Eigenvalues'])#, index=macro_cols) wrong naming
+    return eig_init_perc_df
 
 
 # KMO measure from "Comparative Approaches to Using R and Python for Statistical Data Analysis"
@@ -131,13 +126,8 @@ def varimax(Phi, gamma = 1, q = 20, tol = 1e-6):
         if d/d_old < tol: break
     return dot(Phi, R)
 
-### Decide optimal n_components based on cross validation
-# adapted from http://scikit-learn.org/stable/auto_examples/decomposition/plot_pca_vs_fa_model_selection.html
 
-
-
-n_components = range(12)
-def compute_scores(X):
+def compute_fa_scores(X):
     fa = FactorAnalysis()
     fa_scores = []
     for n in n_components:
@@ -145,8 +135,8 @@ def compute_scores(X):
         fa_scores.append(np.mean(cross_val_score(fa, X)))
     return fa_scores
 
-def find_fa_n_components_by_crossval(X, plot=True):
-    fa_scores = compute_scores(X)
+def find_fa_n_components_by_crossval(X, n_components, plot=True):
+    fa_scores = compute_fa_scores(X)
     n_components_fa = n_components[np.argmax(fa_scores)]
 
     print("best n_components by FactorAnalysis CV = %d" % n_components_fa)
@@ -164,11 +154,110 @@ def find_fa_n_components_by_crossval(X, plot=True):
         plt.show()
     return n_components_fa
 
-##here drop was after 4 components. in original example 3 is deemed optimum
 
-n_components_fa = 3#4
-fa = FactorAnalysis(n_components_fa, random_state=101)
-factor = fa.fit(X)
+def main():
+    # load data from http://www.ats.ucla.edu/stat/spss/output/principal_components_files/M255.SAV
+    df = Sav2Df('M255.SAV')
+    hmap = getHeaderDict('M255.SAV')
 
-covar = fa.get_covariance()
-print global_kmo(covar)
+    # keep columns as stipulated in original article 
+    keep_cols = ['item13', 'item14', 'item15', 'item16', 'item17', 'item18', 
+                 'item19', 'item20', 'item21', 'item22', 'item23', 'item24']
+
+    dfX = df[keep_cols].rename(columns=hmap)#astype(float32)
+    X = dfX.as_matrix()
+
+    univariate_table = get_univariate_table(dfX) #descriptive statistics
+
+    eig_init_perc_df = get_initial_percent_explained_variance(dfX)
+
+
+    ### Decide optimal n_components based on cross validation
+    # adapted from http://scikit-learn.org/stable/auto_examples/decomposition/plot_pca_vs_fa_model_selection.html
+
+    n_components = np.arange(X.shape[1])#[4,6,8,10,12,14,16] #range(12)
+    n_components_fa = find_fa_n_components_by_crossval(X, n_components)
+
+    ##here drop was after 4 components. in original example 3 is deemed optimum
+
+    # with n selected, fit a FactorAnalysis model
+    n_components_fa = 3#4
+    fa = FactorAnalysis(n_components_fa, random_state=101)
+    factor = fa.fit(X)
+
+    covar = fa.get_covariance()
+    
+    # print global_kmo(covar) #results not yet validated
+
+    eig_extraction_perc_df = get_factor_extraction_percent_explained_variance(covar)
+    eig_retain_df = eig_extraction_perc_df.iloc[:n_components_fa]
+
+    loads = pd.DataFrame(fa.components_,columns=macro_cols)#cols)
+    # loads = loads.rename(columns=header_en)
+    cols = loads.columns
+    # loads.to_csv('loads_matrix_10_components.csv', index=False, encoding='utf-8')
+    # OR just load
+    # loads = pd.read_csv('loads_matrix_10_components.csv', encoding='utf-8')
+
+    ## Write each output table to a sheet in an excel file
+
+    writer = pd.ExcelWriter('factor_analysis_{}_components_varimax.xlsx'.format(n_components_fa),
+                         engine='xlsxwriter', options={'encoding':'utf-8'})
+
+
+    cutoff = 0.3#.3
+    for i in xrange(len(loads)):
+        s = loads.iloc[i].sort_values( ascending=False).reset_index()
+        s = s[(s[i]>cutoff) | (s[i]<-cutoff)]
+        # print s
+        s.rename(columns={'index':'component'}).to_excel(writer, 'Postive Sorted Loads', encoding='utf-8', startcol=3*i, index=False)
+
+    for i in xrange(len(loads)):
+        s = loads.iloc[i].sort_values( ascending=False).reset_index()
+        s.rename(columns={'index':'component'}).to_excel(writer, 'Loads', encoding='utf-8', startcol=3*i, index=False)
+
+    loads.rename(columns=header_en).to_excel(writer, 'Raw Components', encoding='utf-8' )
+
+    # repeat for rotated loads
+    loads = pd.DataFrame(varimax(fa.components_),columns=macro_cols)
+    cutoff = 0.3#.3
+    for i in xrange(len(loads)):
+        s = loads.iloc[i].sort_values( ascending=False).reset_index()
+        s = s[(s[i]>cutoff) | (s[i]<-cutoff)]
+        # print s
+        s.rename(columns={'index':'component'}).to_excel(writer, 'Varimax Rot. Pos. Sorted Loads', encoding='utf-8', startcol=3*i, index=False)
+
+    for i in xrange(len(loads)):
+        s = loads.iloc[i].sort_values( ascending=False).reset_index()
+        s.rename(columns={'index':'component'}).to_excel(writer, 'Varimax Rot. Loads', encoding='utf-8', startcol=3*i, index=False)
+
+    loads.rename(columns=header_en).to_excel(writer, 'Varimax Raw Components', encoding='utf-8' )
+
+    ### explained variances and noise
+
+    # levels = [['Initial Eigenvalues', 'Extraction'],
+    #           ['Total', '\% \of Variance', 'Cumulative \%']]
+    # eig_df = pd.DataFrame(columns=pd.MANUALLY_DIGESTED)
+
+    eig_init_perc_df.to_excel(writer, 'Eigenvals (perc. explained var)',  encoding='utf-8')
+    eig_retain_df.to_excel(writer, 'Eigenvals (perc. explained var)',startcol=3,  encoding='utf-8')
+
+
+    noise_var = pd.DataFrame(fa.noise_variance_, index=macro_cols)#.rename(index=header_en)
+    noise_var.to_excel(writer, 'Noise Variance', encoding='utf-8')
+
+    covar_df = pd.DataFrame(covar_extraction, index=cols, columns=cols
+                            ).rename(columns=header_en, index=header_en)
+    covar_df.to_excel(writer, 'Covariance Matrix', encoding='utf-8')
+
+    corr_init_df.to_excel(writer, 'Correlation Mat(Data)', encoding='utf-8')
+
+    corr_extraction_df = pd.DataFrame(corr_extraction, index=macro_cols, columns=macro_cols
+                            )#.rename(columns=header_en, index=header_en)
+    corr_extraction_df.to_excel(writer, 'Corr Mat of Factor Loads ', encoding='utf-8')
+
+    precision_mat = pd.DataFrame(fa.get_precision(), index=cols, columns=cols).rename(columns=header_en)
+    precision_mat.to_excel(writer, 'Precision Matrix', encoding='utf-8')
+
+
+    writer.save()
